@@ -2,20 +2,25 @@
 PATH="/usr/local/bin:/usr/bin:/bin"
 
 #版本、初始化变量
-VERSION="2.1.5"
+VERSION="2.1.9"
 ENV_PATH="$(dirname $0)/.env"
 IS_MACOS=$(uname | grep 'Darwin' | wc -l)
 IS_DISPALY_CONTEXT=1
 TITLE="SSPanel Auto Checkin v${VERSION} 签到通知"
-users_array=($(echo ${USERS} | tr ';' ' '))
+users_array=""
 log_text=""
 COOKIE_PATH="./.ss-autocheckin.cook"
 PUSH_TMP_PATH="./.ss-autocheckin.tmp"
 
+# 本地模式
 if [ -f ${ENV_PATH} ]; then
     source ${ENV_PATH}
 fi
 
+# 加载用户组配置
+users_array=($(echo ${USERS} | tr ';' ' '))
+
+# 是否显示上下文 默认是
 if [ "${DISPALY_CONTEXT}" == "0" ]; then
     IS_DISPALY_CONTEXT=0
 fi
@@ -84,6 +89,60 @@ send_message() {
         fi
     fi
 
+    # Server 酱 Turbo 通知
+if [ "${PUSH_TURBO_KEY}" ]; then
+        echo -e "text=${TITLE}&desp=${log_text}" >${PUSH_TMP_PATH}
+        push=$(curl -k -s -X POST --data-binary @${PUSH_TMP_PATH} "https://sctapi.ftqq.com/${PUSH_TURBO_KEY}.send")
+        ###
+        # push 成功后，获取相关查询参数
+        ### 
+
+        push_code=$(echo ${push} | jq -r ".data.errno" 2>&1)
+        push_id=$(echo ${push} | jq -r ".data.pushid" 2>&1)
+        push_readkey=$(echo ${push} | jq -r ".data.readkey" 2>&1)
+        
+        ###
+        # 企业微信推送逻辑修改
+        # 先放入队列，push_code 为 0 代表放入队列成功不代表推送成功
+        ###
+
+        if [ "${push_code} -eq 0" ]; then
+            echo -e "【Server 酱Turbo 队列结果】: 成功\n"
+            
+            ###
+            # 推送结果需要异步查询
+            # 目前每隔两秒查询一次，轮询 10 次检查推送结果
+            ###
+
+            i=1
+            while [ $i -le 10 ]; do
+                wx_status=$(curl -s "https://sctapi.ftqq.com/push?id=${push_id}&readkey=${push_readkey}")
+                wx_result=$(echo ${wx_status} | jq -r ".data.wxstatus" 2>&1 | sed 's/\"{/{/g'| sed 's/\}"/}/g' | sed 's/\\"/"/g') 
+                if [ "${wx_result}" ]; then
+                    wx_errcode=$(echo ${wx_result} | jq -r ".errcode" 2>&1)
+                    if [ "${wx_errcode} -eq 0" ]; then
+                        echo -e "【Server 酱Turbo 推送结果】: 成功\n"
+                    else
+                        echo -e "【Server 酱Turbo 推送结果】: 失败，错误码:"${wx_errcode}",more info at https:\\open.work.weixin.qq.com\devtool\n"
+                    fi
+                    break
+                else
+                    if [ $i -lt 10 ]; then
+                        let 'i++'
+                        Sleep 2s
+                    else
+                        echo -e "【Server 酱Turbo 推送结果】: 检查超时，请自行确认结果\n"
+                    fi
+
+                fi
+
+            done
+        else
+            echo -e "【Server 酱Turbo 队列结果】: 失败\n"
+        fi
+    fi
+
+
     # Qmsg 酱通知
     if [ "${QMSG_KEY}" ]; then
         result_qmsg_log_text="${TITLE}${log_text}"
@@ -123,7 +182,7 @@ ssp_autochenkin() {
             # 邮箱、域名脱敏处理
             username_prefix="${username%%@*}"
             username_suffix="${username#*@}"
-            username_root="${username#*.}"
+            username_root="${username_suffix#*.}"
             username_text="${username_prefix:0:2}⁎⁎⁎@${username_suffix:0:2}⁎⁎⁎.${username_root}"
 
             domain_protocol="${domain%%://*}"
